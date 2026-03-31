@@ -35,6 +35,7 @@
   },
   "scripts": {
     "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\""
+    "start": "supergateway --stdio 'node build/index.js' --port 3000 --ssePath /sse --messagePath /messages"
   },
   "files": [
     "build"
