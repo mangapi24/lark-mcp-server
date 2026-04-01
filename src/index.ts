@@ -1,5 +1,5 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import * as lark from "@larksuiteoapi/node-sdk";
@@ -346,7 +346,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   return await handler(args);
 });
 
-// HTTP/SSE server for Claude.ai custom connector
+// HTTP/Streamable HTTP server for Claude.ai custom connector
 async function main() {
   const requiredEnvVars = ['LARK_APP_ID','LARK_APP_SECRET','LARK_USER_ID','LARK_CALENDAR_ID','LARK_USER_ACCESS_TOKEN','SUPABASE_KEY','SUPABASE_URL'];
   const missingVars = requiredEnvVars.filter(v => !process.env[v]);
@@ -358,27 +358,25 @@ async function main() {
   const app = express();
   app.use(express.json());
 
-  const transports: Record<string, SSEServerTransport> = {};
-
-  app.get("/sse", async (req, res) => {
-    console.error("New SSE connection");
-    const transport = new SSEServerTransport("/messages", res);
-    transports[transport.sessionId] = transport;
-    res.on("close", () => delete transports[transport.sessionId]);
-    await server.connect(transport);
+  app.post("/mcp", async (req, res) => {
+    try {
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (err) {
+      console.error("MCP error:", err);
+      if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
+    }
   });
 
-  app.post("/messages", async (req, res) => {
-    const sessionId = req.query.sessionId as string;
-    const transport = transports[sessionId];
-    if (transport) await transport.handlePostMessage(req, res);
-    else res.status(404).send("Session not found");
+  app.get("/mcp", async (req, res) => {
+    res.status(405).json({ error: "Method not allowed - use POST" });
   });
 
   app.get("/", (_req, res) => res.json({ status: "ok", message: "Lark MCP Server running" }));
 
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => console.error(`Lark MCP HTTP/SSE server running on port ${PORT}`));
+  app.listen(PORT, () => console.error(`Lark MCP HTTP server running on port ${PORT}`));
 }
 
 main().catch(err => { console.error("Fatal error:", err); process.exit(1); });
