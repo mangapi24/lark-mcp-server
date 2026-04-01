@@ -1,10 +1,11 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import * as lark from "@larksuiteoapi/node-sdk";
 import { isRecurrenceInRange } from './utils/recurrence.js';
 import { createClient } from '@supabase/supabase-js';
+import express from "express";
 
 // Create Lark client instance
 const client = new lark.Client({
@@ -213,508 +214,171 @@ const toolHandlers = {
     const { content } = schemas.toolInputs.send_message_to_user.parse(args);
     try {
       const messageContent = JSON.stringify({ text: content });
-      console.error("Sending message content:", messageContent);
-      
       const result = await client.im.message.create({
-          params: {
-            receive_id_type: "user_id", 
-          },
+          params: { receive_id_type: "user_id" },
           data: {
             receive_id: process.env.LARK_USER_ID!,
             msg_type: "text",
             content: messageContent
           },
       });
-      
-      console.error("Received response:", JSON.stringify(result, null, 2));
-
-      if (!result) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: "Failed to send message to Lark"
-          }]
-        };
+      if (!result || result.code !== 0) {
+        return { content: [{ type: "text" as const, text: `Failed to send message: ${result?.msg || "Unknown error"}` }] };
       }
-
-      if (result.code !== 0) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Failed to send message: ${result.msg || "Unknown error"}`
-          }]
-        };
-      }
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Message sent successfully! Message ID: ${result.data?.message_id || "unknown"}`
-        }]
-      };
+      return { content: [{ type: "text" as const, text: `Message sent successfully! Message ID: ${result.data?.message_id || "unknown"}` }] };
     } catch (error) {
-      console.error("Error sending Lark message:", error);
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Error sending message: ${error instanceof Error ? error.message : "Unknown error"}`
-        }]
-      };
+      return { content: [{ type: "text" as const, text: `Error sending message: ${error instanceof Error ? error.message : "Unknown error"}` }] };
     }
   },
 
   async list_events(args: unknown) {
     const { start_time, end_time, calendar_id } = schemas.toolInputs.list_events.parse(args);
-    
-    // Convert ISO strings to Unix timestamps
     const startUnix = Math.floor(new Date(start_time).getTime() / 1000).toString();
     const endUnix = Math.floor(new Date(end_time).getTime() / 1000).toString();
-    
     const result = await client.calendar.v4.calendarEvent.list({
-      path: {
-        calendar_id: calendar_id === "primary" ? process.env.LARK_CALENDAR_ID! : calendar_id,
-      },
-      params: {
-        page_size: 1000,
-        start_time: startUnix,
-        end_time: endUnix,
-      }
+      path: { calendar_id: calendar_id === "primary" ? process.env.LARK_CALENDAR_ID! : calendar_id },
+      params: { page_size: 1000, start_time: startUnix, end_time: endUnix }
     }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN!));
-
-    console.error("Received response:", JSON.stringify(result, null, 2));
-
-    if (!result) {
-      return {
-        content: [{
-          type: "text" as const,
-          text: "Failed to list events from Lark"
-        }]
-      };
+    if (!result || result.code !== 0) {
+      return { content: [{ type: "text" as const, text: `Failed to list events: ${result?.msg || "Unknown error"}` }] };
     }
-    
-    if (result.code !== 0) {
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Failed to list events: ${result.msg || "Unknown error"}`
-        }]
-      };
-    }
-
     const allEvents = result.data?.items || [];
-    // Filter out cancelled events
     const events = allEvents.filter(event =>
-      (event.status !== "cancelled" &&
-      event.start_time?.timestamp && 
-      event.end_time?.timestamp &&
-      parseInt(event.start_time.timestamp) >= parseInt(startUnix) &&
-      parseInt(event.end_time.timestamp) <= parseInt(endUnix)) ||
-      (event.recurrence !== "" &&
-      event.status !== "cancelled" &&
-      isRecurrenceInRange(
-        event.recurrence || "",
-        {
-          startTime: parseInt(event.start_time?.timestamp || "0"),
-          endTime: parseInt(event.end_time?.timestamp || "0")
-        },
-        {
-          startTime: parseInt(startUnix),
-          endTime: parseInt(endUnix)
-        }
-      ))
+      (event.status !== "cancelled" && event.start_time?.timestamp && event.end_time?.timestamp &&
+        parseInt(event.start_time.timestamp) >= parseInt(startUnix) && parseInt(event.end_time.timestamp) <= parseInt(endUnix)) ||
+      (event.recurrence !== "" && event.status !== "cancelled" &&
+        isRecurrenceInRange(event.recurrence || "", { startTime: parseInt(event.start_time?.timestamp || "0"), endTime: parseInt(event.end_time?.timestamp || "0") }, { startTime: parseInt(startUnix), endTime: parseInt(endUnix) }))
     );
-
-    
-    // Format events in the desired structure
-    const formattedEvents = events.map(event => {
-      const startTimestamp = event.start_time?.timestamp || "0";
-      const endTimestamp = event.end_time?.timestamp || "0";
-      
-      return {
-        summary: event.summary || "",
-        organizer: event.event_organizer?.display_name || "",
-        status: event.status || "unknown",
-        startTime: new Date(parseInt(startTimestamp) * 1000).toLocaleString(),
-        endTime: new Date(parseInt(endTimestamp) * 1000).toLocaleString(),
-        // Temporarily added for test purposes
-        rerecurrence: event.recurrence
-      };
-    });
-
-    return {
-      content: [{
-        type: "text" as const,
-        text: events.length ? 
-          `Found ${events.length} active events:\n\n${JSON.stringify(formattedEvents, null, 2)}` : 
-          "No active events found in the given time range"
-      }]
-    };
+    const formattedEvents = events.map(event => ({
+      summary: event.summary || "",
+      organizer: event.event_organizer?.display_name || "",
+      status: event.status || "unknown",
+      startTime: new Date(parseInt(event.start_time?.timestamp || "0") * 1000).toLocaleString(),
+      endTime: new Date(parseInt(event.end_time?.timestamp || "0") * 1000).toLocaleString(),
+      rerecurrence: event.recurrence
+    }));
+    return { content: [{ type: "text" as const, text: events.length ? `Found ${events.length} active events:\n\n${JSON.stringify(formattedEvents, null, 2)}` : "No active events found in the given time range" }] };
   },
 
   async create_event(args: unknown) {
-    const { summary, description, start_time, end_time, location, need_notification } = 
-      schemas.toolInputs.create_event.parse(args);
-    
+    const { summary, description, start_time, end_time, location, need_notification } = schemas.toolInputs.create_event.parse(args);
     try {
-      // Convert ISO strings to time_info objects
       const startTimestamp = Math.floor(Date.parse(start_time) / 1000).toString();
       const endTimestamp = Math.floor(Date.parse(end_time) / 1000).toString();
-      
-      // Create request data
       const requestData: any = {
-        summary,
-        need_notification: need_notification ?? true,
-        start_time: {
-          timestamp: startTimestamp,
-          timezone: "Asia/Shanghai"
-        },
-        end_time: {
-          timestamp: endTimestamp,
-          timezone: "Asia/Shanghai"
-        },
-        attendee_ability:"can_modify_event"
+        summary, need_notification: need_notification ?? true,
+        start_time: { timestamp: startTimestamp, timezone: "Asia/Shanghai" },
+        end_time: { timestamp: endTimestamp, timezone: "Asia/Shanghai" },
+        attendee_ability: "can_modify_event"
       };
-
-      // Add optional fields if provided
-      if (description) {
-        requestData.description = description;
-      }
-      
-      if (location) {
-        requestData.location = {
-          name: location
-        };
-      }
-      
-      // Generate a UUID for idempotency_key
-      
-      console.error("Creating event with data:", JSON.stringify(requestData, null, 2));
-      
+      if (description) requestData.description = description;
+      if (location) requestData.location = { name: location };
       const result = await client.calendar.v4.calendarEvent.create({
-        path: {
-          calendar_id: process.env.LARK_CALENDAR_ID!,
-        },
+        path: { calendar_id: process.env.LARK_CALENDAR_ID! },
         data: requestData
       }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN!));
-      
-      console.error("Received response:", JSON.stringify(result, null, 2));
-      
-      if (!result) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: "Failed to create event in Lark calendar"
-          }]
-        };
+      if (!result || result.code !== 0) {
+        return { content: [{ type: "text" as const, text: `Failed to create event: ${result?.msg || "Unknown error"}` }] };
       }
-      
-      if (result.code !== 0) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Failed to create event: ${result.msg || "Unknown error"}`
-          }]
-        };
-      }
-      
-      // Extract event details from the response
-      const eventData = result.data?.event;
-      const eventId = eventData?.event_id || "unknown";
-      const eventSummary = eventData?.summary || summary;
-
-      // Add creator as attendee
+      const eventId = result.data?.event?.event_id || "unknown";
       if (eventId !== "unknown") {
-        const attendeeResult = await client.calendar.v4.calendarEventAttendee.create({
-          path: {
-            calendar_id: process.env.LARK_CALENDAR_ID!,
-            event_id: eventId
-          },
-          params: {
-            user_id_type: "user_id"
-          },
-          data: {
-            attendees: [{
-              type: "user",
-              user_id: process.env.LARK_USER_ID!,
-              is_optional: false
-            }],
-            need_notification: false
-          }
+        await client.calendar.v4.calendarEventAttendee.create({
+          path: { calendar_id: process.env.LARK_CALENDAR_ID!, event_id: eventId },
+          params: { user_id_type: "user_id" },
+          data: { attendees: [{ type: "user", user_id: process.env.LARK_USER_ID!, is_optional: false }], need_notification: false }
         }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN!));
-
-        console.error("Add creator as attendee response:", JSON.stringify(attendeeResult, null, 2));
       }
-      
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Event "${eventSummary}" created successfully!\nEvent ID: ${eventId}`
-        }]
-      };
+      return { content: [{ type: "text" as const, text: `Event "${result.data?.event?.summary || summary}" created successfully!\nEvent ID: ${eventId}` }] };
     } catch (error) {
-      console.error("Error creating Lark calendar event:", error);
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Error creating event: ${error instanceof Error ? error.message : "Unknown error"}`
-        }]
-      };
+      return { content: [{ type: "text" as const, text: `Error creating event: ${error instanceof Error ? error.message : "Unknown error"}` }] };
     }
   },
+
   async add_attendees(args: unknown) {
     const { event_id, attendees, need_notification } = schemas.toolInputs.add_attendees.parse(args);
-    
     try {
-      // Transform attendees to Lark API format
       const transformedAttendees = attendees.map(attendee => {
-        const transformedAttendee: any = {
-          type: attendee.type,
-          is_optional: attendee.is_optional || false
-        };
-        
-        // Add type-specific ID field
-        switch (attendee.type) {
-          case "user":
-            if (!attendee.user_id) {
-              throw new Error("user_id is required when type is 'user'");
-            }
-            transformedAttendee.user_id = attendee.user_id;
-            break;
-          case "chat":
-            if (!attendee.chat_id) {
-              throw new Error("chat_id is required when type is 'chat'");
-            }
-            transformedAttendee.chat_id = attendee.chat_id;
-            break;
-          case "resource":
-            if (!attendee.resource_id) {
-              throw new Error("resource_id is required when type is 'resource'");
-            }
-            transformedAttendee.resource_id = attendee.resource_id;
-            break;
-          case "third_party":
-            if (!attendee.third_party_email) {
-              throw new Error("third_party_email is required when type is 'third_party'");
-            }
-            transformedAttendee.third_party_email = attendee.third_party_email;
-            break;
-        }
-        
-        // Add optional fields if present
-        if (attendee.operate_id) {
-          transformedAttendee.operate_id = attendee.operate_id;
-        }
-        
-        if (attendee.approval_reason) {
-          transformedAttendee.approval_reason = attendee.approval_reason;
-        }
-        
-        return transformedAttendee;
+        const t: any = { type: attendee.type, is_optional: attendee.is_optional || false };
+        if (attendee.type === "user") t.user_id = attendee.user_id;
+        if (attendee.type === "chat") t.chat_id = attendee.chat_id;
+        if (attendee.type === "resource") t.resource_id = attendee.resource_id;
+        if (attendee.type === "third_party") t.third_party_email = attendee.third_party_email;
+        if (attendee.operate_id) t.operate_id = attendee.operate_id;
+        if (attendee.approval_reason) t.approval_reason = attendee.approval_reason;
+        return t;
       });
-      
-      // Prepare request data
-      const requestData = {
-        attendees: transformedAttendees,
-        need_notification: need_notification ?? true
-      };
-      
-      console.error(`Adding attendees to event ${event_id} with data:`, JSON.stringify(requestData, null, 2));
-      
       const result = await client.calendar.v4.calendarEventAttendee.create({
-        path: {
-          calendar_id: process.env.LARK_CALENDAR_ID!,
-          event_id: event_id
-        },
-        params: {
-          user_id_type: "user_id"
-        },
-        data: requestData
+        path: { calendar_id: process.env.LARK_CALENDAR_ID!, event_id },
+        params: { user_id_type: "user_id" },
+        data: { attendees: transformedAttendees, need_notification: need_notification ?? true }
       }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN!));
-      
-      console.error("Received response:", JSON.stringify(result, null, 2));
-      
-      if (!result) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: "Failed to add attendees to event"
-          }]
-        };
+      if (!result || result.code !== 0) {
+        return { content: [{ type: "text" as const, text: `Failed to add attendees: ${result?.msg || "Unknown error"}` }] };
       }
-      
-      if (result.code !== 0) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Failed to add attendees: ${result.msg || "Unknown error"}`
-          }]
-        };
-      }
-      
-      // Get information about added attendees
-      const addedAttendees = result.data?.attendees || [];
-      const attendeeCount = addedAttendees.length;
-      
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Successfully added ${attendeeCount} attendee(s) to the event`
-        }]
-      };
+      return { content: [{ type: "text" as const, text: `Successfully added ${result.data?.attendees?.length || 0} attendee(s) to the event` }] };
     } catch (error) {
-      console.error("Error adding attendees to event:", error);
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Error adding attendees: ${error instanceof Error ? error.message : "Unknown error"}`
-        }]
-      };
+      return { content: [{ type: "text" as const, text: `Error adding attendees: ${error instanceof Error ? error.message : "Unknown error"}` }] };
     }
   },
+
   async search_user_in_supabase(args: unknown) {
     const { name_query } = schemas.toolInputs.search_user_in_supabase.parse(args);
-    
     try {
-      console.error(`Searching Supabase for users with name containing: ${name_query}`);
-      
-      if (!supabaseKey) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: "Error: SUPABASE_KEY environment variable is not set."
-          }]
-        };
-      }
-      
-      // Perform a case-insensitive search with ILIKE
-      let { data, error } = await supabase
-        .from('lark_members')
-        .select('user_id, user_name, user_main_calendar_id')
-        .ilike('user_name', `%${name_query}%`);
-
-      if (error) {
-        console.error("Supabase query error:", error);
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Error querying Supabase: ${error.message}`
-          }]
-        };
-      }
-      
-      if (!data || data.length === 0) {
-        console.error('lark_members'+data)
-        return {
-          content: [{
-            type: "text" as const,
-            text: `No users found with name containing "${name_query}".`
-          }]
-        };
-      }
-      
-      // Format the results in a readable way
-      const formattedResults = data.map(user => ({
-        user_id: user.user_id,
-        user_name: user.user_name,
-        calendar_id: user.user_main_calendar_id
-      }));
-      
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Found ${data.length} user(s) matching "${name_query}":\n\n${JSON.stringify(formattedResults, null, 2)}`
-        }]
-      };
+      const { data, error } = await supabase.from('lark_members').select('user_id, user_name, user_main_calendar_id').ilike('user_name', `%${name_query}%`);
+      if (error) return { content: [{ type: "text" as const, text: `Error querying Supabase: ${error.message}` }] };
+      if (!data || data.length === 0) return { content: [{ type: "text" as const, text: `No users found with name containing "${name_query}".` }] };
+      return { content: [{ type: "text" as const, text: `Found ${data.length} user(s) matching "${name_query}":\n\n${JSON.stringify(data.map(u => ({ user_id: u.user_id, user_name: u.user_name, calendar_id: u.user_main_calendar_id })), null, 2)}` }] };
     } catch (error) {
-      console.error("Error searching users in Supabase:", error);
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Error searching users in Supabase: ${error instanceof Error ? error.message : "Unknown error"}`
-        }]
-      };
-    };
+      return { content: [{ type: "text" as const, text: `Error searching users: ${error instanceof Error ? error.message : "Unknown error"}` }] };
+    }
   }
 };
 
 // Create server instance
-const server = new Server({
-  name: "lark-mcp-server",
-  version: "1.0.0",
-}, {
-  capabilities: {
-    tools: {},
-  }
-});
+const server = new Server({ name: "lark-mcp-server", version: "1.0.0" }, { capabilities: { tools: {} } });
 
-
-// Register tool
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  console.error("Tools requested by client");
-  console.error("Returning tools:", JSON.stringify(TOOL_DEFINITIONS, null, 2));
-  return { tools: TOOL_DEFINITIONS };
-});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFINITIONS }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-  
-  try {
-    const handler = toolHandlers[name as keyof typeof toolHandlers];
-    if (!handler) {
-      throw new Error(`Unknown tool: ${name}`);
-    }
-    
-    return await handler(args);
-  } catch (error) {
-    console.error(`Error executing tool ${name}:`, error);
-    throw error;
-  }
+  const handler = toolHandlers[name as keyof typeof toolHandlers];
+  if (!handler) throw new Error(`Unknown tool: ${name}`);
+  return await handler(args);
 });
 
-// Main function to run the server
+// HTTP/SSE server for Claude.ai custom connector
 async function main() {
-  try {
-    // Check for required environment variables
-    const requiredEnvVars = [
-      'LARK_APP_ID',
-      'LARK_APP_SECRET',
-      'LARK_USER_ID',
-      'LARK_CALENDAR_ID',
-      'LARK_USER_ACCESS_TOKEN', 
-      'SUPABASE_KEY',
-      'SUPABASE_URL'
-    ];
-
-    const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
-    if (missingVars.length > 0) {
-      console.error(`Missing required environment variables: ${missingVars.join(', ')}`);
-      process.exit(1);
-    }
-
-    console.error("Starting server with env vars:", {
-      appId: process.env.LARK_APP_ID?.substring(0, 5) + '...',
-      appSecret: process.env.LARK_APP_SECRET?.substring(0, 5) + '...',
-      hasUserId: !!process.env.LARK_USER_ID,
-      hasCalendarId: !!process.env.LARK_CALENDAR_ID,
-      supabaseKey: process.env.SUPABASE_KEY?.substring(0, 8) + '...',
-      supabaseUrl: !!process.env.SUPABASE_URL
-    });
-
-    const transport = new StdioServerTransport();
-    console.error("Created transport");
-    
-    await server.connect(transport);
-    console.error("Connected to transport");
-    
-    console.error("Lark MCP Server running on stdio");
-  } catch (error) {
-    console.error("Startup error:", error);
+  const requiredEnvVars = ['LARK_APP_ID','LARK_APP_SECRET','LARK_USER_ID','LARK_CALENDAR_ID','LARK_USER_ACCESS_TOKEN','SUPABASE_KEY','SUPABASE_URL'];
+  const missingVars = requiredEnvVars.filter(v => !process.env[v]);
+  if (missingVars.length > 0) {
+    console.error(`Missing required environment variables: ${missingVars.join(', ')}`);
     process.exit(1);
   }
+
+  const app = express();
+  app.use(express.json());
+
+  const transports: Record<string, SSEServerTransport> = {};
+
+  app.get("/sse", async (req, res) => {
+    console.error("New SSE connection");
+    const transport = new SSEServerTransport("/messages", res);
+    transports[transport.sessionId] = transport;
+    res.on("close", () => delete transports[transport.sessionId]);
+    await server.connect(transport);
+  });
+
+  app.post("/messages", async (req, res) => {
+    const sessionId = req.query.sessionId as string;
+    const transport = transports[sessionId];
+    if (transport) await transport.handlePostMessage(req, res);
+    else res.status(404).send("Session not found");
+  });
+
+  app.get("/", (_req, res) => res.json({ status: "ok", message: "Lark MCP Server running" }));
+
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.error(`Lark MCP HTTP/SSE server running on port ${PORT}`));
 }
 
-main().catch((error) => {
-  console.error("Fatal error in main():", error);
-  process.exit(1);
-});
-
+main().catch(err => { console.error("Fatal error:", err); process.exit(1); });
