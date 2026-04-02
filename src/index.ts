@@ -358,16 +358,27 @@ async function main() {
   const app = express();
   app.use(express.json());
 
-  app.post("/mcp", async (req, res) => {
-    try {
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-    } catch (err) {
-      console.error("MCP error:", err);
-      if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
-    }
-  });
+app.post("/mcp", async (req, res) => {
+  try {
+    const freshServer = new Server(
+      { name: "lark-mcp-server", version: "1.0.0" },
+      { capabilities: { tools: {} } }
+    );
+    freshServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFINITIONS }));
+    freshServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+      const handler = toolHandlers[name as keyof typeof toolHandlers];
+      if (!handler) throw new Error(`Unknown tool: ${name}`);
+      return await handler(args);
+    });
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    await freshServer.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    console.error("MCP error:", err);
+    if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
+  }
+});
 
   app.get("/mcp", async (req, res) => {
     res.status(405).json({ error: "Method not allowed - use POST" });
